@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs Chat</title>
+<style>
+  :root { --bg: #f4f6f8; --panel: #fff; --fg: #1c2530; --muted: #5d6875; --line: #d4dbe3; --accent: #0d6b77; --accent-soft: #e0f0f1; --fact: #f3ecfa; --fact-line: #7a3e9d; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #11161c; --panel: #1a212b; --fg: #e5e9ee; --muted: #9ba6b4; --line: #364250; --accent: #55c2cc; --accent-soft: #163a3f; --fact: #2a1d36; --fact-line: #c99be6; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  .app { max-width: 760px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  label.toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 14px; cursor: pointer; }
+  #warning { display: none; background: #fdecd0; color: #6b4300; border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+  #log { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .human { align-self: flex-end; background: var(--accent); color: #fff; }
+  .ai { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
+  .meta { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .chip { display: inline-block; background: var(--accent-soft); color: var(--fg); border-radius: 999px; padding: 1px 8px; margin: 2px 4px 0 0; }
+  details { margin-top: 6px; }
+  .fact { background: var(--fact); border-left: 3px solid var(--fact-line); padding: 3px 8px; margin-top: 4px; border-radius: 4px; }
+  form { display: flex; gap: 8px; position: sticky; bottom: 0; padding-block: 8px; background: var(--bg); }
+  input[type=text] { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); font: inherit; }
+  button { padding: 10px 16px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  .empty { color: var(--muted); text-align: center; margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Chat with your documents</h1>
+    <label class="toggle"><input type="checkbox" id="useGraph" checked> Use Graph RAG</label>
+  </header>
+  <div id="warning"></div>
+  <div id="log"><p class="empty">Ask anything about the files in your docs folder.<br>Try: "Who manages the team that builds the Trail X?"</p></div>
+  <form id="form">
+    <input type="text" id="question" placeholder="Type your question..." autocomplete="off" required>
+    <button id="send">Send</button>
+  </form>
+</div>
+
+<script>
+  const log = document.getElementById('log')
+  const form = document.getElementById('form')
+  const input = document.getElementById('question')
+  const sendBtn = document.getElementById('send')
+  const history = [] // alternating question, answer (the course's convHistory)
+
+  // Warn if the server's .env is incomplete
+  fetch('/api/health').then((r) => r.json()).then((h) => {
+    if (!h.ok) {
+      const w = document.getElementById('warning')
+      w.textContent = `Setup needed: add ${h.missing.join(', ')} to the .env file, then restart the server (see README.md).`
+      w.style.display = 'block'
+    }
+  })
+
+  function addMessage(text, who) {
+    log.querySelector('.empty')?.remove()
+    const div = document.createElement('div')
+    div.className = `msg ${who}`
+    div.textContent = text // textContent, never innerHTML: model output is untrusted
+    log.appendChild(div)
+    div.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    return div
+  }
+
+  function addDetails(bubble, { sources, facts }) {
+    const meta = document.createElement('div')
+    meta.className = 'meta'
+    if (sources?.length) {
+      meta.append('Sources: ')
+      for (const s of sources) {
+        const chip = document.createElement('span')
+        chip.className = 'chip'
+        chip.textContent = s
+        meta.append(chip)
+      }
+    }
+    if (facts?.length) {
+      const d = document.createElement('details')
+      const summary = document.createElement('summary')
+      summary.textContent = `Graph facts used (${facts.length})`
+      d.append(summary)
+      for (const f of facts) {
+        const row = document.createElement('div')
+        row.className = 'fact'
+        row.textContent = `${f.subject} → ${f.relation} → ${f.object}  [${f.source}]`
+        d.append(row)
+      }
+      meta.append(d)
+    }
+    if (meta.childNodes.length) bubble.append(meta)
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const question = input.value.trim()
+    if (!question) return
+    input.value = ''
+    addMessage(question, 'human')
+    const bubble = addMessage('Thinking...', 'ai')
+    sendBtn.disabled = true
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, history, useGraph: document.getElementById('useGraph').checked }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Something went wrong.')
+      bubble.textContent = data.answer
+      addDetails(bubble, data)
+      history.push(question, data.answer)
+    } catch (err) {
+      bubble.textContent = `Error: ${err.message}`
+    } finally {
+      sendBtn.disabled = false
+      input.focus()
+    }
+  })
+</script>
+</body>
+</html>
